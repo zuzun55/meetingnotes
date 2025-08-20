@@ -1,57 +1,88 @@
 import streamlit as st
-import whisper
-from collections import Counter
+from transcription import transcribe_audio
 import tempfile
+import os
+import subprocess
 
 # -----------------------
-# Summarizer
+# Extractive Meeting Summary
 # -----------------------
-def summarize_text(text, sentence_count=5):
-    sentences = text.split(". ")
-    words = text.lower().split()
-    word_freq = Counter(words)
+def generate_meeting_summary(transcript):
+    """Classify sentences into Decisions, Action Items, and Key Points"""
+    sentences = transcript.split(". ")
+    decisions, actions, key_points = [], [], []
 
-    sentence_scores = {}
+    decision_keywords = ["decided", "agreed", "approved", "resolution", "conclusion"]
+    action_keywords = ["will", "need to", "plan to", "assign", "responsible", "action"]
+    
     for sent in sentences:
-        for word in sent.split():
-            if word.lower() in word_freq:
-                sentence_scores[sent] = sentence_scores.get(sent, 0) + word_freq[word.lower()]
+        lowered = sent.lower()
+        if any(k in lowered for k in decision_keywords):
+            decisions.append(sent)
+        elif any(k in lowered for k in action_keywords):
+            actions.append(sent)
+        else:
+            key_points.append(sent)
 
-    ranked_sentences = sorted(sentence_scores, key=sentence_scores.get, reverse=True)
-    return ". ".join(ranked_sentences[:sentence_count])
+    summary = {
+        "Decisions": ". ".join(decisions) if decisions else "None",
+        "Action Items": ". ".join(actions) if actions else "None",
+        "Key Points": ". ".join(key_points) if key_points else "None",
+    }
+    return summary
+
+# -----------------------
+# Extract audio from video
+# -----------------------
+def extract_audio_from_video(video_path, audio_path):
+    command = ["ffmpeg", "-y", "-i", video_path, "-vn", "-acodec", "mp3", audio_path]
+    subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
 # -----------------------
 # Streamlit UI
 # -----------------------
-st.title("Meeting Audio/Video Transcriber & Summarizer")
-st.write(
-    "Upload an audio or video file, and get the transcript and summary instantly. "
-    "No installation needed—everything runs in your browser!"
-)
+st.title("🎤 Meeting Notes Transcriber & Summarizer")
 
 uploaded_file = st.file_uploader(
-    "Upload audio/video file", type=["mp3", "wav", "m4a", "mp4"]
+    "Upload an audio or video file",
+    type=["mp3", "wav", "m4a", "mp4", "mov", "avi", "mkv"]
 )
 
-if uploaded_file:
-    # Save uploaded file temporarily
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_file:
-        temp_file.write(uploaded_file.read())
-        temp_path = temp_file.name
+if uploaded_file is not None:
+    suffix = os.path.splitext(uploaded_file.name)[1]
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(uploaded_file.read())
+        tmp_path = tmp.name
 
-    with st.spinner("⏳ Loading Whisper model..."):
-        model = whisper.load_model("small")  # you can use "tiny" or "base" for faster load
+    # Extract audio if video
+    if suffix.lower() in [".mp4", ".mov", ".avi", ".mkv"]:
+        audio_path = tmp_path.replace(suffix, ".mp3")
+        extract_audio_from_video(tmp_path, audio_path)
+    else:
+        audio_path = tmp_path
 
-    with st.spinner("🎤 Transcribing... This may take a minute"):
-        result = model.transcribe(temp_path, language="en")
-        transcript = result["text"]
+    st.info("⏳ Transcribing...")
+    result = transcribe_audio(audio_path, model_size="base")
+    transcript = result["text"]
 
     st.subheader("📜 Transcript")
     st.text_area("Transcript", transcript, height=300)
 
-    summary = summarize_text(transcript)
-    st.subheader("📝 Summary")
-    st.text_area("Summary", summary, height=200)
+    # Generate structured summary
+    summary = generate_meeting_summary(transcript)
+    st.subheader("📝 Meeting Minutes Summary")
+    for section, content in summary.items():
+        st.markdown(f"**{section}:** {content}")
 
-    st.download_button("Download Transcript", transcript, "transcript.txt")
-    st.download_button("Download Summary", summary, "summary.txt")
+    # Downloads
+    st.download_button("⬇️ Download Transcript", transcript, "transcript.txt")
+    st.download_button(
+        "⬇️ Download Meeting Summary",
+        "\n".join(f"{k}: {v}" for k, v in summary.items()),
+        "meeting_summary.txt"
+    )
+
+    # Detailed segments
+    with st.expander("🔎 Detailed Segments"):
+        for seg in result["segments"]:
+            st.write(f"[{seg['start']:.2f} - {seg['end']:.2f}] {seg['text']}")
